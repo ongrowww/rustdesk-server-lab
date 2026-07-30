@@ -98,6 +98,38 @@ enum LoopFailure {
     ConsoleListener,
 }
 
+fn build_ongrow_register_pk_response(
+    mut result: register_pk_response::Result,
+    identity: Option<DeviceIdentitySnapshot>,
+    nonce: &[u8],
+    server_secret_key: Option<&sign::SecretKey>,
+    issued_at: i64,
+) -> RegisterPkResponse {
+    let mut attestation = None;
+    if result == register_pk_response::Result::OK && !nonce.is_empty() {
+        attestation = identity.and_then(|identity| {
+            server_secret_key.and_then(|secret_key| {
+                issue_ongrow_device_attestation(
+                    &identity.id,
+                    &identity.pk,
+                    &identity.uuid,
+                    nonce,
+                    issued_at,
+                    secret_key,
+                )
+            })
+        });
+        if attestation.is_none() {
+            result = register_pk_response::Result::SERVER_ERROR;
+        }
+    }
+    RegisterPkResponse {
+        result: result.into(),
+        ongrow_device_attestation: MessageField::from_option(attestation),
+        ..Default::default()
+    }
+}
+
 impl RendezvousServer {
     pub fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
         Self::start_with_bind(None, port, serial, key, rmem)
@@ -576,24 +608,32 @@ impl RendezvousServer {
                 }
                 Some(rendezvous_message::Union::RegisterPk(rk)) => {
                     let ip = addr.ip().to_string();
-                    let res = if rk.pk.is_empty() {
-                        register_pk_response::Result::NOT_SUPPORT
+                    let nonce = rk.ongrow_attestation_nonce.as_ref();
+                    let (res, identity) = if rk.pk.is_empty() {
+                        (register_pk_response::Result::NOT_SUPPORT, None)
                     } else if rk.old_id.is_empty() || rk.uuid.is_empty() {
-                        register_pk_response::Result::UUID_MISMATCH
+                        (register_pk_response::Result::UUID_MISMATCH, None)
                     } else if !is_valid_ongrow_custom_id(&rk.id) {
-                        register_pk_response::Result::INVALID_ID_FORMAT
+                        (register_pk_response::Result::INVALID_ID_FORMAT, None)
+                    } else if !nonce.is_empty()
+                        && nonce.len() != ONGROW_ATTESTATION_NONCE_BYTES
+                    {
+                        (register_pk_response::Result::UUID_MISMATCH, None)
                     } else if !self.check_ip_blocker(&ip, &rk.id).await {
-                        register_pk_response::Result::TOO_FREQUENT
+                        (register_pk_response::Result::TOO_FREQUENT, None)
                     } else {
                         self.pm
-                            .change_id(&rk.old_id, &rk.id, &rk.uuid, &rk.pk)
+                            .change_id(&rk.old_id, &rk.id, &rk.uuid, nonce, &rk.pk)
                             .await
                     };
                     let mut msg_out = RendezvousMessage::new();
-                    msg_out.set_register_pk_response(RegisterPkResponse {
-                        result: res.into(),
-                        ..Default::default()
-                    });
+                    msg_out.set_register_pk_response(build_ongrow_register_pk_response(
+                        res,
+                        identity,
+                        nonce,
+                        self.inner.sk.as_ref(),
+                        now() as i64,
+                    ));
                     Self::send_to_sink(sink, msg_out).await;
                 }
                 _ => {}
@@ -1430,5 +1470,93 @@ mod tests {
         let bind_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let socket = create_udp_listener(Some(bind_addr), 0, 0).await.unwrap();
         assert_eq!(socket.local_addr().unwrap().ip(), bind_addr);
+    }
+}
+
+#[cfg(test)]
+mod ongrow_device_attestation_tests {
+    use super::*;
+
+    fn identity() -> (DeviceIdentitySnapshot, sign::PublicKey) {
+        sodiumoxide::init().unwrap();
+        let (device_public_key, _) = sign::keypair_from_seed(&sign::Seed([7; 32]));
+        (
+            DeviceIdentitySnapshot {
+                id: "OG-0001".to_owned(),
+                uuid: Bytes::from_static(b"raw-test-machine-uuid"),
+                pk: device_public_key.0.to_vec().into(),
+            },
+            device_public_key,
+        )
+    }
+
+    #[test]
+    fn v1_response_stays_compatible_without_attestation() {
+        let (identity, _) = identity();
+        let response = build_ongrow_register_pk_response(
+            register_pk_response::Result::OK,
+            Some(identity),
+            &[],
+            None,
+            1_722_345_600,
+        );
+
+        assert_eq!(
+            response.result.enum_value(),
+            Ok(register_pk_response::Result::OK)
+        );
+        assert!(response
+            .ongrow_device_attestation
+            .into_option()
+            .is_none());
+    }
+
+    #[test]
+    fn v2_never_returns_unsigned_attestation() {
+        let (identity, _) = identity();
+        let response = build_ongrow_register_pk_response(
+            register_pk_response::Result::OK,
+            Some(identity),
+            &[9; ONGROW_ATTESTATION_NONCE_BYTES],
+            None,
+            1_722_345_600,
+        );
+
+        assert_eq!(
+            response.result.enum_value(),
+            Ok(register_pk_response::Result::SERVER_ERROR)
+        );
+        assert!(response
+            .ongrow_device_attestation
+            .into_option()
+            .is_none());
+    }
+
+    #[test]
+    fn v2_response_contains_verifiable_attestation() {
+        let (identity, device_public_key) = identity();
+        let (server_public_key, server_secret_key) =
+            sign::keypair_from_seed(&sign::Seed([11; 32]));
+        let response = build_ongrow_register_pk_response(
+            register_pk_response::Result::OK,
+            Some(identity),
+            &[9; ONGROW_ATTESTATION_NONCE_BYTES],
+            Some(&server_secret_key),
+            1_722_345_600,
+        );
+
+        assert_eq!(
+            response.result.enum_value(),
+            Ok(register_pk_response::Result::OK)
+        );
+        let attestation = response
+            .ongrow_device_attestation
+            .into_option()
+            .unwrap();
+        assert_eq!(attestation.device_pk.as_ref(), &device_public_key.0);
+        assert!(verify_ongrow_device_attestation(
+            &attestation,
+            &server_public_key.0,
+        ));
     }
 }
