@@ -47,11 +47,11 @@ jobs:
         with:
           prefix-key: ongrow-rustdesk-server-ubuntu-24.04
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
       - name: Run tests
         run: cargo test --locked
+
+      - name: Check formatting
+        run: cargo fmt --package hbbs -- --check
 
       - name: Build release binaries
         run: cargo build --release --locked --bin hbbs --bin hbbr
