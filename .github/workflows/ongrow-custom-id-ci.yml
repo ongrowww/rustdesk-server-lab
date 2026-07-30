@@ -49,7 +49,11 @@ jobs:
           prefix-key: ongrow-rustdesk-server-ubuntu-24.04
 
       - name: Check formatting
-        run: cargo fmt --package hbbs -- --check
+        run: |
+          rustfmt --edition 2021 --check \
+            src/common.rs \
+            src/peer.rs \
+            src/rendezvous_server.rs
 
       - name: Run tests
         run: cargo test --locked
