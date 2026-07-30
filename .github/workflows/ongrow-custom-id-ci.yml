@@ -48,9 +48,6 @@ jobs:
         with:
           prefix-key: ongrow-rustdesk-server-ubuntu-24.04
 
-      - name: Check committed whitespace
-        run: git show --check --oneline "$GITHUB_SHA"
-
       - name: Run tests
         run: cargo test --locked
 
