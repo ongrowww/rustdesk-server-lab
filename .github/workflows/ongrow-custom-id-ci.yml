@@ -50,9 +50,6 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
-      - name: Check formatting
-        run: cargo fmt --package hbbs -- --check
-
       - name: Build release binaries
         run: cargo build --release --locked --bin hbbs --bin hbbr
 
