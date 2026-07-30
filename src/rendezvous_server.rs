@@ -574,8 +574,21 @@ impl RendezvousServer {
                     msg_out.set_test_nat_response(res);
                     Self::send_to_sink(sink, msg_out).await;
                 }
-                Some(rendezvous_message::Union::RegisterPk(_)) => {
-                    let res = register_pk_response::Result::NOT_SUPPORT;
+                Some(rendezvous_message::Union::RegisterPk(rk)) => {
+                    let ip = addr.ip().to_string();
+                    let res = if rk.pk.is_empty() {
+                        register_pk_response::Result::NOT_SUPPORT
+                    } else if rk.old_id.is_empty() || rk.uuid.is_empty() {
+                        register_pk_response::Result::UUID_MISMATCH
+                    } else if !is_valid_ongrow_custom_id(&rk.id) {
+                        register_pk_response::Result::INVALID_ID_FORMAT
+                    } else if !self.check_ip_blocker(&ip, &rk.id).await {
+                        register_pk_response::Result::TOO_FREQUENT
+                    } else {
+                        self.pm
+                            .change_id(&rk.old_id, &rk.id, &rk.uuid, &rk.pk)
+                            .await
+                    };
                     let mut msg_out = RendezvousMessage::new();
                     msg_out.set_register_pk_response(RegisterPkResponse {
                         result: res.into(),

@@ -69,11 +69,98 @@ pub async fn accept_or_pending(
     }
 }
 
+const ONGROW_CUSTOM_ID_PROOF_CONTEXT: &[u8] = b"ongrow-rustdesk-custom-id-v1";
+
+pub(crate) fn is_valid_ongrow_custom_id(id: &str) -> bool {
+    id.len() == 7
+        && id.starts_with("OG-")
+        && id.as_bytes()[3..].iter().all(u8::is_ascii_digit)
+}
+
+fn ongrow_custom_id_proof_payload(old_id: &str, new_id: &str, uuid: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(
+        ONGROW_CUSTOM_ID_PROOF_CONTEXT.len() + old_id.len() + new_id.len() + uuid.len() + 12,
+    );
+    payload.extend_from_slice(ONGROW_CUSTOM_ID_PROOF_CONTEXT);
+    for field in [old_id.as_bytes(), new_id.as_bytes(), uuid] {
+        payload.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        payload.extend_from_slice(field);
+    }
+    payload
+}
+
+pub(crate) fn verify_ongrow_custom_id_proof(
+    old_id: &str,
+    new_id: &str,
+    uuid: &[u8],
+    proof: &[u8],
+    public_key: &[u8],
+) -> bool {
+    if public_key.len() != sign::PUBLICKEYBYTES {
+        return false;
+    }
+    let mut public_key_bytes = [0; sign::PUBLICKEYBYTES];
+    public_key_bytes.copy_from_slice(public_key);
+    sign::verify(proof, &sign::PublicKey(public_key_bytes))
+        .map(|signed_payload| {
+            signed_payload == ongrow_custom_id_proof_payload(old_id, new_id, uuid)
+        })
+        .unwrap_or(false)
+}
+
 #[allow(dead_code)]
 pub(crate) fn get_expired_time() -> Instant {
     let now = Instant::now();
     now.checked_sub(std::time::Duration::from_secs(3600))
         .unwrap_or(now)
+}
+
+#[cfg(test)]
+mod ongrow_custom_id_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_ongrow_four_digit_ids() {
+        assert!(is_valid_ongrow_custom_id("OG-0001"));
+        assert!(is_valid_ongrow_custom_id("OG-9999"));
+        assert!(!is_valid_ongrow_custom_id("og-0001"));
+        assert!(!is_valid_ongrow_custom_id("OG-123"));
+        assert!(!is_valid_ongrow_custom_id("OG-12345"));
+        assert!(!is_valid_ongrow_custom_id("OG-12A4"));
+    }
+
+    #[test]
+    fn verifies_proof_for_exact_change_only() {
+        sodiumoxide::init().unwrap();
+        let (public_key, secret_key) = sign::gen_keypair();
+        let uuid = b"test-machine-uuid";
+        let proof = sign::sign(
+            &ongrow_custom_id_proof_payload("123456789", "OG-0001", uuid),
+            &secret_key,
+        );
+
+        assert!(verify_ongrow_custom_id_proof(
+            "123456789",
+            "OG-0001",
+            uuid,
+            &proof,
+            &public_key.0,
+        ));
+        assert!(!verify_ongrow_custom_id_proof(
+            "123456789",
+            "OG-0002",
+            uuid,
+            &proof,
+            &public_key.0,
+        ));
+        assert!(!verify_ongrow_custom_id_proof(
+            "987654321",
+            "OG-0001",
+            uuid,
+            &proof,
+            &public_key.0,
+        ));
+    }
 }
 
 #[allow(dead_code)]
@@ -305,7 +392,6 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
     }
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

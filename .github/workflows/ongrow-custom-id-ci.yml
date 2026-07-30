@@ -1,0 +1,67 @@
+name: OnGROW RustDesk Server - Custom ID CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/001-ongrow-custom-id
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ongrow-rustdesk-server-custom-id-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.90"
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify source revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: ongrow-rustdesk-server-ubuntu-24.04
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binaries
+        run: cargo build --release --locked --bin hbbs --bin hbbr
+
+      - name: Upload Linux x86_64 binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ongrow-rustdesk-server-1.1.16-linux-x86_64
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            target/release/hbbs
+            target/release/hbbr
