@@ -48,12 +48,8 @@ jobs:
         with:
           prefix-key: ongrow-rustdesk-server-ubuntu-24.04
 
-      - name: Check formatting
-        run: |
-          rustfmt --edition 2021 --check \
-            src/common.rs \
-            src/peer.rs \
-            src/rendezvous_server.rs
+      - name: Check committed whitespace
+        run: git show --check --oneline "$GITHUB_SHA"
 
       - name: Run tests
         run: cargo test --locked
