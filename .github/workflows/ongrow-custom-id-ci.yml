@@ -53,6 +53,13 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --bin hbbs --bin hbbr
 
+      - name: Verify Linux runtime dependencies
+        shell: bash
+        run: |
+          file target/release/hbbs target/release/hbbr
+          ! ldd target/release/hbbs | grep -Fq "not found"
+          ! ldd target/release/hbbr | grep -Fq "not found"
+
       - name: Upload Linux x86_64 binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -62,3 +69,43 @@ jobs:
           path: |
             target/release/hbbs
             target/release/hbbr
+
+      - name: Build OnGROW server image
+        shell: bash
+        run: |
+          docker build \
+            --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --file docker/ongrow/Dockerfile \
+            --tag ongrow-rustdesk-server:1.1.16-ongrow.1 \
+            .
+          test "$(
+            docker image inspect \
+              ongrow-rustdesk-server:1.1.16-ongrow.1 \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$GITHUB_SHA"
+
+      - name: Smoke test server binaries
+        run: |
+          docker run --rm ongrow-rustdesk-server:1.1.16-ongrow.1 hbbs --version
+          docker run --rm ongrow-rustdesk-server:1.1.16-ongrow.1 hbbr --version
+
+      - name: Export and checksum server image
+        shell: bash
+        run: |
+          docker save \
+            --output ongrow-rustdesk-server-1.1.16-ongrow.1-linux-x86_64.tar \
+            ongrow-rustdesk-server:1.1.16-ongrow.1
+          gzip --best ongrow-rustdesk-server-1.1.16-ongrow.1-linux-x86_64.tar
+          sha256sum \
+            ongrow-rustdesk-server-1.1.16-ongrow.1-linux-x86_64.tar.gz \
+            > ongrow-rustdesk-server-1.1.16-ongrow.1-linux-x86_64.tar.gz.sha256
+
+      - name: Upload server image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ongrow-rustdesk-server-1.1.16-ongrow.1-linux-x86_64-image
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ongrow-rustdesk-server-1.1.16-ongrow.1-linux-x86_64.tar.gz
+            ongrow-rustdesk-server-1.1.16-ongrow.1-linux-x86_64.tar.gz.sha256
