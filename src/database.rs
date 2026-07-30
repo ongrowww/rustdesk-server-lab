@@ -174,7 +174,8 @@ impl Database {
             Err(err)
                 if err
                     .as_database_error()
-                    .map(|database_error| database_error.is_unique_violation())
+                    .and_then(|database_error| database_error.code())
+                    .map(|code| code == "2067" || code == "1555")
                     .unwrap_or(false) =>
             {
                 Ok(ChangePeerIdOutcome::IdExists)
