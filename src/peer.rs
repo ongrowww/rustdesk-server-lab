@@ -132,6 +132,64 @@ impl PeerMap {
         register_pk_response::Result::OK
     }
 
+    pub(crate) async fn change_id(
+        &self,
+        old_id: &str,
+        new_id: &str,
+        uuid: &[u8],
+        proof: &[u8],
+    ) -> register_pk_response::Result {
+        let peer = match self.get(old_id).await {
+            Some(peer) => peer,
+            None => return register_pk_response::Result::UUID_MISMATCH,
+        };
+        let (guid, stored_uuid, stored_pk) = {
+            let peer = peer.read().await;
+            (peer.guid.clone(), peer.uuid.clone(), peer.pk.clone())
+        };
+        if guid.is_empty()
+            || stored_uuid.as_ref() != uuid
+            || !verify_ongrow_custom_id_proof(
+                old_id,
+                new_id,
+                uuid,
+                proof,
+                stored_pk.as_ref(),
+            )
+        {
+            return register_pk_response::Result::UUID_MISMATCH;
+        }
+        if old_id == new_id {
+            return register_pk_response::Result::OK;
+        }
+        if self.get(new_id).await.is_some() {
+            return register_pk_response::Result::ID_EXISTS;
+        }
+
+        match self
+            .db
+            .change_peer_id(&guid, old_id, new_id, uuid, stored_pk.as_ref())
+            .await
+        {
+            Ok(database::ChangePeerIdOutcome::Changed) => {
+                let mut peers = self.map.write().await;
+                peers.remove(old_id);
+                peers.insert(new_id.to_owned(), peer);
+                register_pk_response::Result::OK
+            }
+            Ok(database::ChangePeerIdOutcome::IdExists) => {
+                register_pk_response::Result::ID_EXISTS
+            }
+            Ok(database::ChangePeerIdOutcome::IdentityMismatch) => {
+                register_pk_response::Result::UUID_MISMATCH
+            }
+            Err(err) => {
+                log::error!("db.change_peer_id failed: {}", err);
+                register_pk_response::Result::SERVER_ERROR
+            }
+        }
+    }
+
     #[inline]
     pub(crate) async fn get(&self, id: &str) -> Option<LockPeer> {
         let p = self.map.read().await.get(id).cloned();
