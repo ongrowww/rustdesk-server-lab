@@ -60,6 +60,13 @@ impl Default for Peer {
 pub(crate) type LockPeer = Arc<RwLock<Peer>>;
 
 #[derive(Clone)]
+pub(crate) struct DeviceIdentitySnapshot {
+    pub(crate) id: String,
+    pub(crate) uuid: Bytes,
+    pub(crate) pk: Bytes,
+}
+
+#[derive(Clone)]
 pub(crate) struct PeerMap {
     map: Arc<RwLock<HashMap<String, LockPeer>>>,
     pub(crate) db: database::Database,
@@ -137,33 +144,54 @@ impl PeerMap {
         old_id: &str,
         new_id: &str,
         uuid: &[u8],
+        nonce: &[u8],
         proof: &[u8],
-    ) -> register_pk_response::Result {
+    ) -> (
+        register_pk_response::Result,
+        Option<DeviceIdentitySnapshot>,
+    ) {
         let peer = match self.get(old_id).await {
             Some(peer) => peer,
-            None => return register_pk_response::Result::UUID_MISMATCH,
+            None => return (register_pk_response::Result::UUID_MISMATCH, None),
         };
         let (guid, stored_uuid, stored_pk) = {
             let peer = peer.read().await;
             (peer.guid.clone(), peer.uuid.clone(), peer.pk.clone())
         };
-        if guid.is_empty()
-            || stored_uuid.as_ref() != uuid
-            || !verify_ongrow_custom_id_proof(
+        let proof_is_valid = if nonce.is_empty() {
+            verify_ongrow_custom_id_proof(
                 old_id,
                 new_id,
                 uuid,
                 proof,
                 stored_pk.as_ref(),
             )
+        } else {
+            verify_ongrow_custom_id_proof_v2(
+                old_id,
+                new_id,
+                uuid,
+                nonce,
+                proof,
+                stored_pk.as_ref(),
+            )
+        };
+        if guid.is_empty()
+            || stored_uuid.as_ref() != uuid
+            || !proof_is_valid
         {
-            return register_pk_response::Result::UUID_MISMATCH;
+            return (register_pk_response::Result::UUID_MISMATCH, None);
         }
+        let snapshot = || DeviceIdentitySnapshot {
+            id: new_id.to_owned(),
+            uuid: stored_uuid.clone(),
+            pk: stored_pk.clone(),
+        };
         if old_id == new_id {
-            return register_pk_response::Result::OK;
+            return (register_pk_response::Result::OK, Some(snapshot()));
         }
         if self.get(new_id).await.is_some() {
-            return register_pk_response::Result::ID_EXISTS;
+            return (register_pk_response::Result::ID_EXISTS, None);
         }
 
         match self
@@ -175,17 +203,17 @@ impl PeerMap {
                 let mut peers = self.map.write().await;
                 peers.remove(old_id);
                 peers.insert(new_id.to_owned(), peer);
-                register_pk_response::Result::OK
+                (register_pk_response::Result::OK, Some(snapshot()))
             }
             Ok(database::ChangePeerIdOutcome::IdExists) => {
-                register_pk_response::Result::ID_EXISTS
+                (register_pk_response::Result::ID_EXISTS, None)
             }
             Ok(database::ChangePeerIdOutcome::IdentityMismatch) => {
-                register_pk_response::Result::UUID_MISMATCH
+                (register_pk_response::Result::UUID_MISMATCH, None)
             }
             Err(err) => {
                 log::error!("db.change_peer_id failed: {}", err);
-                register_pk_response::Result::SERVER_ERROR
+                (register_pk_response::Result::SERVER_ERROR, None)
             }
         }
     }

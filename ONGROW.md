@@ -22,6 +22,28 @@ Der Signaturnachweis wird im vorhandenen `RegisterPk.pk`-Feld übertragen. Das
 vermeidet eine Änderung am Protobuf-Schema; für normale UDP-Registrierungen
 behält das Feld unverändert seine Upstream-Bedeutung als Public Key.
 
+## Serverbestätigte Geräteidentität
+
+Der Branch `feature/002-device-attestation` erweitert den Custom-ID-Pfad
+rückwärtskompatibel um eine kurzlebige Geräteattestierung:
+
+- Ein V1-Request ohne Nonce verhält sich unverändert und erhält keine
+  Attestierung.
+- Ein V2-Request bindet eine exakt 32 Byte lange Nonce in den signierten
+  Gerätebesitznachweis ein.
+- Nach atomarer Prüfung der Zuordnung aus ID, UUID und Geräteschlüssel
+  signiert `hbbs` einen fünf Minuten gültigen Identitätssnapshot.
+- Die rohe UUID verlässt den Server nicht; die Attestierung enthält
+  ausschließlich ihren SHA-256-Hash.
+- Ohne privaten Serverschlüssel wird keine unsigned Attestierung ausgegeben.
+- Attestierungen sind Identitätsnachweise, keine Sitzung und kein
+  Zugriffsrecht.
+
+Die neuen Protobuf-Felder sind auf beiden Forks identisch nummeriert. Die
+Signaturkontexte `ongrow-rustdesk-custom-id-v2` und
+`ongrow-rustdesk-device-attestation-v1` trennen Besitznachweis und
+Serverattestierung voneinander.
+
 ## Upstream-Synchronisierung
 
 ```bash

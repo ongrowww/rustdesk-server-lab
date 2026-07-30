@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - feature/001-ongrow-custom-id
+      - feature/002-device-attestation
   pull_request:
     branches:
       - master
@@ -46,6 +47,9 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: ongrow-rustdesk-server-ubuntu-24.04
+
+      - name: Check formatting
+        run: cargo fmt --package hbbs -- --check
 
       - name: Run tests
         run: cargo test --locked

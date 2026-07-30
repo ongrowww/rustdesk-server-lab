@@ -1,6 +1,12 @@
 use clap::App;
 use hbb_common::{
-    allow_err, anyhow::{Context, Result}, get_version_number, log, tokio, ResultType
+    allow_err,
+    anyhow::{Context, Result},
+    bytes::Bytes,
+    get_version_number, log,
+    rendezvous_proto::OnGrowDeviceAttestation,
+    sha2::{Digest, Sha256},
+    tokio, ResultType,
 };
 use ini::Ini;
 use sodiumoxide::crypto::sign;
@@ -11,7 +17,12 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-const ONGROW_CUSTOM_ID_PROOF_CONTEXT: &[u8] = b"ongrow-rustdesk-custom-id-v1";
+const ONGROW_CUSTOM_ID_PROOF_CONTEXT_V1: &[u8] = b"ongrow-rustdesk-custom-id-v1";
+const ONGROW_CUSTOM_ID_PROOF_CONTEXT_V2: &[u8] = b"ongrow-rustdesk-custom-id-v2";
+const ONGROW_DEVICE_ATTESTATION_CONTEXT: &[u8] =
+    b"ongrow-rustdesk-device-attestation-v1";
+pub(crate) const ONGROW_ATTESTATION_NONCE_BYTES: usize = 32;
+const ONGROW_ATTESTATION_VALIDITY_SECONDS: i64 = 300;
 
 pub(crate) fn is_valid_ongrow_custom_id(id: &str) -> bool {
     id.len() == 7
@@ -21,14 +32,42 @@ pub(crate) fn is_valid_ongrow_custom_id(id: &str) -> bool {
 
 fn ongrow_custom_id_proof_payload(old_id: &str, new_id: &str, uuid: &[u8]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(
-        ONGROW_CUSTOM_ID_PROOF_CONTEXT.len() + old_id.len() + new_id.len() + uuid.len() + 12,
+        ONGROW_CUSTOM_ID_PROOF_CONTEXT_V1.len() + old_id.len() + new_id.len() + uuid.len() + 12,
     );
-    payload.extend_from_slice(ONGROW_CUSTOM_ID_PROOF_CONTEXT);
+    payload.extend_from_slice(ONGROW_CUSTOM_ID_PROOF_CONTEXT_V1);
     for field in [old_id.as_bytes(), new_id.as_bytes(), uuid] {
-        payload.extend_from_slice(&(field.len() as u32).to_be_bytes());
-        payload.extend_from_slice(field);
+        append_ongrow_field(&mut payload, field);
     }
     payload
+}
+
+fn ongrow_custom_id_proof_payload_v2(
+    old_id: &str,
+    new_id: &str,
+    uuid: &[u8],
+    nonce: &[u8],
+) -> Option<Vec<u8>> {
+    if nonce.len() != ONGROW_ATTESTATION_NONCE_BYTES {
+        return None;
+    }
+    let mut payload = Vec::with_capacity(
+        ONGROW_CUSTOM_ID_PROOF_CONTEXT_V2.len()
+            + old_id.len()
+            + new_id.len()
+            + uuid.len()
+            + nonce.len()
+            + 16,
+    );
+    payload.extend_from_slice(ONGROW_CUSTOM_ID_PROOF_CONTEXT_V2);
+    for field in [old_id.as_bytes(), new_id.as_bytes(), uuid, nonce] {
+        append_ongrow_field(&mut payload, field);
+    }
+    Some(payload)
+}
+
+fn append_ongrow_field(payload: &mut Vec<u8>, field: &[u8]) {
+    payload.extend_from_slice(&(field.len() as u32).to_be_bytes());
+    payload.extend_from_slice(field);
 }
 
 pub(crate) fn verify_ongrow_custom_id_proof(
@@ -48,6 +87,133 @@ pub(crate) fn verify_ongrow_custom_id_proof(
             signed_payload == ongrow_custom_id_proof_payload(old_id, new_id, uuid)
         })
         .unwrap_or(false)
+}
+
+pub(crate) fn verify_ongrow_custom_id_proof_v2(
+    old_id: &str,
+    new_id: &str,
+    uuid: &[u8],
+    nonce: &[u8],
+    proof: &[u8],
+    public_key: &[u8],
+) -> bool {
+    if public_key.len() != sign::PUBLICKEYBYTES {
+        return false;
+    }
+    let Some(expected_payload) =
+        ongrow_custom_id_proof_payload_v2(old_id, new_id, uuid, nonce)
+    else {
+        return false;
+    };
+    let mut public_key_bytes = [0; sign::PUBLICKEYBYTES];
+    public_key_bytes.copy_from_slice(public_key);
+    sign::verify(proof, &sign::PublicKey(public_key_bytes))
+        .map(|signed_payload| signed_payload == expected_payload)
+        .unwrap_or(false)
+}
+
+pub(crate) fn hash_ongrow_device_uuid(uuid: &[u8]) -> Bytes {
+    Bytes::from(Sha256::digest(uuid).to_vec())
+}
+
+pub(crate) fn ongrow_device_attestation_payload(
+    id: &str,
+    device_pk: &[u8],
+    uuid_sha256: &[u8],
+    issued_at: i64,
+    expires_at: i64,
+    nonce: &[u8],
+) -> Option<Vec<u8>> {
+    if !is_valid_ongrow_custom_id(id)
+        || device_pk.len() != sign::PUBLICKEYBYTES
+        || uuid_sha256.len() != 32
+        || nonce.len() != ONGROW_ATTESTATION_NONCE_BYTES
+    {
+        return None;
+    }
+    let issued_at_bytes = issued_at.to_be_bytes();
+    let expires_at_bytes = expires_at.to_be_bytes();
+    let mut payload = Vec::with_capacity(
+        ONGROW_DEVICE_ATTESTATION_CONTEXT.len()
+            + id.len()
+            + device_pk.len()
+            + uuid_sha256.len()
+            + nonce.len()
+            + 6 * 4
+            + 16,
+    );
+    payload.extend_from_slice(ONGROW_DEVICE_ATTESTATION_CONTEXT);
+    for field in [
+        id.as_bytes(),
+        device_pk,
+        uuid_sha256,
+        issued_at_bytes.as_slice(),
+        expires_at_bytes.as_slice(),
+        nonce,
+    ] {
+        append_ongrow_field(&mut payload, field);
+    }
+    Some(payload)
+}
+
+pub(crate) fn issue_ongrow_device_attestation(
+    id: &str,
+    device_pk: &[u8],
+    uuid: &[u8],
+    nonce: &[u8],
+    issued_at: i64,
+    secret_key: &sign::SecretKey,
+) -> Option<OnGrowDeviceAttestation> {
+    let expires_at = issued_at.checked_add(ONGROW_ATTESTATION_VALIDITY_SECONDS)?;
+    let uuid_sha256 = hash_ongrow_device_uuid(uuid);
+    let payload = ongrow_device_attestation_payload(
+        id,
+        device_pk,
+        &uuid_sha256,
+        issued_at,
+        expires_at,
+        nonce,
+    )?;
+    Some(OnGrowDeviceAttestation {
+        id: id.to_owned(),
+        device_pk: device_pk.to_vec().into(),
+        uuid_sha256,
+        issued_at,
+        expires_at,
+        nonce: nonce.to_vec().into(),
+        signed_payload: sign::sign(&payload, secret_key).into(),
+        ..Default::default()
+    })
+}
+
+pub(crate) fn verify_ongrow_device_attestation(
+    attestation: &OnGrowDeviceAttestation,
+    server_public_key: &[u8],
+) -> bool {
+    if server_public_key.len() != sign::PUBLICKEYBYTES
+        || attestation.expires_at.checked_sub(attestation.issued_at)
+            != Some(ONGROW_ATTESTATION_VALIDITY_SECONDS)
+    {
+        return false;
+    }
+    let Some(expected_payload) = ongrow_device_attestation_payload(
+        &attestation.id,
+        &attestation.device_pk,
+        &attestation.uuid_sha256,
+        attestation.issued_at,
+        attestation.expires_at,
+        &attestation.nonce,
+    ) else {
+        return false;
+    };
+    let mut public_key_bytes = [0; sign::PUBLICKEYBYTES];
+    public_key_bytes.copy_from_slice(server_public_key);
+    sign::verify(
+        &attestation.signed_payload,
+        &sign::PublicKey(public_key_bytes),
+    )
+    .map(|payload| payload == expected_payload)
+    .unwrap_or(false)
 }
 
 #[allow(dead_code)]
@@ -102,6 +268,125 @@ mod ongrow_custom_id_tests {
             &proof,
             &public_key.0,
         ));
+    }
+
+    #[test]
+    fn verifies_nonce_bound_v2_proof() {
+        sodiumoxide::init().unwrap();
+        let (public_key, secret_key) = sign::keypair_from_seed(&sign::Seed([7; 32]));
+        let uuid = b"test-machine-uuid";
+        let nonce = [9; ONGROW_ATTESTATION_NONCE_BYTES];
+        let payload =
+            ongrow_custom_id_proof_payload_v2("OG-0001", "OG-0001", uuid, &nonce).unwrap();
+        let proof = sign::sign(&payload, &secret_key);
+
+        assert!(verify_ongrow_custom_id_proof_v2(
+            "OG-0001",
+            "OG-0001",
+            uuid,
+            &nonce,
+            &proof,
+            &public_key.0,
+        ));
+        let mut changed_nonce = nonce;
+        changed_nonce[0] ^= 1;
+        assert!(!verify_ongrow_custom_id_proof_v2(
+            "OG-0001",
+            "OG-0001",
+            uuid,
+            &changed_nonce,
+            &proof,
+            &public_key.0,
+        ));
+        assert!(!verify_ongrow_custom_id_proof_v2(
+            "OG-0001",
+            "OG-0002",
+            uuid,
+            &nonce,
+            &proof,
+            &public_key.0,
+        ));
+        assert!(!verify_ongrow_custom_id_proof_v2(
+            "OG-0001",
+            "OG-0001",
+            b"different-machine-uuid",
+            &nonce,
+            &proof,
+            &public_key.0,
+        ));
+        let (different_public_key, _) =
+            sign::keypair_from_seed(&sign::Seed([8; 32]));
+        assert!(!verify_ongrow_custom_id_proof_v2(
+            "OG-0001",
+            "OG-0001",
+            uuid,
+            &nonce,
+            &proof,
+            &different_public_key.0,
+        ));
+        assert!(!verify_ongrow_custom_id_proof_v2(
+            "OG-0001",
+            "OG-0001",
+            uuid,
+            &nonce[..31],
+            &proof,
+            &public_key.0,
+        ));
+    }
+
+    #[test]
+    fn issues_and_verifies_short_lived_device_attestation() {
+        sodiumoxide::init().unwrap();
+        let (server_public_key, server_secret_key) =
+            sign::keypair_from_seed(&sign::Seed([11; 32]));
+        let (device_public_key, _) = sign::keypair_from_seed(&sign::Seed([7; 32]));
+        let uuid = b"raw-test-machine-uuid";
+        let nonce = [9; ONGROW_ATTESTATION_NONCE_BYTES];
+        let attestation = issue_ongrow_device_attestation(
+            "OG-0001",
+            &device_public_key.0,
+            uuid,
+            &nonce,
+            1_722_345_600,
+            &server_secret_key,
+        )
+        .unwrap();
+
+        assert_eq!(attestation.expires_at - attestation.issued_at, 300);
+        assert_eq!(attestation.uuid_sha256, hash_ongrow_device_uuid(uuid));
+        assert_ne!(attestation.uuid_sha256.as_ref(), uuid);
+        assert!(verify_ongrow_device_attestation(
+            &attestation,
+            &server_public_key.0,
+        ));
+
+        let mut changed = attestation.clone();
+        changed.id = "OG-0002".to_owned();
+        assert!(!verify_ongrow_device_attestation(
+            &changed,
+            &server_public_key.0,
+        ));
+    }
+
+    #[test]
+    fn attestation_payload_matches_cross_fork_test_vector() {
+        let device_pk: Vec<u8> = (0..32).collect();
+        let uuid_sha256 = hash_ongrow_device_uuid(b"raw-test-machine-uuid");
+        let payload = ongrow_device_attestation_payload(
+            "OG-0001",
+            &device_pk,
+            &uuid_sha256,
+            1_722_345_600,
+            1_722_345_900,
+            &[9; ONGROW_ATTESTATION_NONCE_BYTES],
+        )
+        .unwrap();
+        let actual: String = payload.iter().map(|byte| format!("{byte:02x}")).collect();
+
+        assert_eq!(
+            actual,
+            "6f6e67726f772d727573746465736b2d6465766963652d6174746573746174696f6e2d7631000000074f472d3030303100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000020c0d751187c93edea0572d744031fe1cf82b9a18fd8c9bd414bcdd0c1ea266116000000080000000066a8e880000000080000000066a8e9ac000000200909090909090909090909090909090909090909090909090909090909090909"
+        );
     }
 }
 
