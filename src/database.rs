@@ -46,6 +46,13 @@ pub struct Peer {
     pub status: Option<i64>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChangePeerIdOutcome {
+    Changed,
+    IdExists,
+    IdentityMismatch,
+}
+
 impl Database {
     pub async fn new(url: &str) -> ResultType<Database> {
         if !std::path::Path::new(url).exists() {
@@ -141,10 +148,45 @@ impl Database {
         .await?;
         Ok(())
     }
+
+    pub(crate) async fn change_peer_id(
+        &self,
+        guid: &[u8],
+        old_id: &str,
+        new_id: &str,
+        uuid: &[u8],
+        pk: &[u8],
+    ) -> ResultType<ChangePeerIdOutcome> {
+        let result = sqlx::query(
+            "update peer set id=? where guid=? and id=? and uuid=? and pk=?",
+        )
+        .bind(new_id)
+        .bind(guid)
+        .bind(old_id)
+        .bind(uuid)
+        .bind(pk)
+        .execute(self.pool.get().await?.deref_mut())
+        .await;
+
+        match result {
+            Ok(result) if result.rows_affected() == 1 => Ok(ChangePeerIdOutcome::Changed),
+            Ok(_) => Ok(ChangePeerIdOutcome::IdentityMismatch),
+            Err(err)
+                if err
+                    .as_database_error()
+                    .map(|database_error| database_error.is_unique_violation())
+                    .unwrap_or(false) =>
+            {
+                Ok(ChangePeerIdOutcome::IdExists)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::ChangePeerIdOutcome;
     use hbb_common::tokio;
     #[test]
     fn test_insert() {
@@ -176,5 +218,72 @@ mod tests {
             jobs.push(a);
         }
         hbb_common::futures::future::join_all(jobs).await;
+    }
+
+    #[test]
+    fn change_peer_id_is_atomic_and_identity_bound() {
+        change_peer_id();
+    }
+
+    #[tokio::main(flavor = "multi_thread")]
+    async fn change_peer_id() {
+        let database_path = std::env::temp_dir().join(format!(
+            "ongrow-rustdesk-server-change-id-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let database_path_string = database_path.to_string_lossy().to_string();
+        let db = super::Database::new(&database_path_string).await.unwrap();
+        let uuid_a = b"uuid-a";
+        let public_key_a = b"public-key-a";
+        let guid_a = db
+            .insert_peer("123456789", uuid_a, public_key_a, "{}")
+            .await
+            .unwrap();
+        db.insert_peer("OG-0002", b"uuid-b", b"public-key-b", "{}")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.change_peer_id(
+                &guid_a,
+                "123456789",
+                "OG-0001",
+                uuid_a,
+                public_key_a,
+            )
+            .await
+            .unwrap(),
+            ChangePeerIdOutcome::Changed,
+        );
+        assert!(db.get_peer("123456789").await.unwrap().is_none());
+        assert!(db.get_peer("OG-0001").await.unwrap().is_some());
+
+        assert_eq!(
+            db.change_peer_id(
+                &guid_a,
+                "OG-0001",
+                "OG-0002",
+                uuid_a,
+                public_key_a,
+            )
+            .await
+            .unwrap(),
+            ChangePeerIdOutcome::IdExists,
+        );
+        assert_eq!(
+            db.change_peer_id(
+                &guid_a,
+                "OG-0001",
+                "OG-0003",
+                b"wrong-uuid",
+                public_key_a,
+            )
+            .await
+            .unwrap(),
+            ChangePeerIdOutcome::IdentityMismatch,
+        );
+
+        drop(db);
+        std::fs::remove_file(database_path).unwrap();
     }
 }
