@@ -23,7 +23,7 @@ env:
   RUST_VERSION: "1.90"
   ONGROW_CLIENT_REVISION: "118bb3160ccd8d587b33cc861c945a8ecb82577a"
   ONGROW_CLIENT_HBB_COMMON_REVISION: "27931b984a26877801f9afcc03e9d36b9f7bbdea"
-  ONGROW_SERVER_HBB_COMMON_REVISION: "2db8e6a53252d37d38fe6ca69cc58d09843faaf2"
+  ONGROW_SERVER_HBB_COMMON_REVISION: "7f4a9b382117b66d74a3c73df176e67277af6684"
 
 jobs:
   verify-and-build:
@@ -44,7 +44,7 @@ jobs:
       - name: Checkout pinned OnGROW client contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: ongrowww/rustdesk
+          repository: ongrowww/rustdesk-lab
           ref: ${{ env.ONGROW_CLIENT_REVISION }}
           path: compatibility-client
           submodules: recursive
