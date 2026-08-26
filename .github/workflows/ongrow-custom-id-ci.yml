@@ -6,6 +6,7 @@ on:
     branches:
       - feature/001-ongrow-custom-id
       - feature/002-device-attestation
+      - feature/003-client-compatibility-gate
   pull_request:
     branches:
       - master
@@ -20,6 +21,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.90"
+  ONGROW_CLIENT_REVISION: "118bb3160ccd8d587b33cc861c945a8ecb82577a"
+  ONGROW_CLIENT_HBB_COMMON_REVISION: "27931b984a26877801f9afcc03e9d36b9f7bbdea"
+  ONGROW_SERVER_HBB_COMMON_REVISION: "2db8e6a53252d37d38fe6ca69cc58d09843faaf2"
 
 jobs:
   verify-and-build:
@@ -37,6 +41,26 @@ jobs:
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
+      - name: Checkout pinned OnGROW client contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ongrowww/rustdesk
+          ref: ${{ env.ONGROW_CLIENT_REVISION }}
+          path: compatibility-client
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify pinned client and server contract
+        shell: bash
+        run: |
+          python3 scripts/check_ongrow_client_compatibility.py \
+            --client-root compatibility-client \
+            --server-root . \
+            --client-revision "$ONGROW_CLIENT_REVISION" \
+            --server-revision "$GITHUB_SHA" \
+            --client-hbb-common-revision "$ONGROW_CLIENT_HBB_COMMON_REVISION" \
+            --server-hbb-common-revision "$ONGROW_SERVER_HBB_COMMON_REVISION"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
@@ -47,6 +71,19 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: ongrow-rustdesk-server-ubuntu-24.04
+
+      - name: Compile pinned client protobuf artifacts
+        run: |
+          cargo test \
+            --manifest-path compatibility-client/Cargo.toml \
+            --locked \
+            --package hbb_common
+
+      - name: Remove compatibility checkout before packaging
+        shell: bash
+        run: |
+          test "$(git -C compatibility-client rev-parse HEAD)" = "$ONGROW_CLIENT_REVISION"
+          rm -rf "$GITHUB_WORKSPACE/compatibility-client"
 
       - name: Run tests
         run: cargo test --locked

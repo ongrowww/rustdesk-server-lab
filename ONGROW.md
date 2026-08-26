@@ -55,3 +55,17 @@ git merge --ff-only upstream/master
 Feature-Branches werden anschließend auf den gewünschten getesteten
 Upstream-Tag beziehungsweise Commit rebased. Pushes zum Upstream-Remote sind im
 lokalen Checkout deaktiviert.
+
+## Client-Kompatibilitätsgate
+
+Der dedizierte OnGROW-CI-Workflow prüft zusätzlich einen fest gepinnten
+Client-Commit und beide `hbb_common`-Gitlinks. Der Test kompiliert die tatsächlichen
+Protobuf-Artefakte beider Forks und vergleicht die OnGROW-Feldnummern,
+Signaturkontexte und den kanonischen Attestierungsvektor. Die Server-Unit-Tests
+decken Registrierung, Custom-ID, serverbestätigte Identität sowie manipulierte
+Nachweise ab.
+
+Das Gate nutzt ausschließlich synthetische Schlüssel und lokale Testdaten. Es
+startet keine Verbindung zur Produktionsinfrastruktur und benötigt weder den
+produktiven hbbs-Schlüssel noch andere Geheimwerte. Eine Protobuf-Kollision,
+abweichende Revision oder ein veränderter Testvektor bricht den Build ab.
